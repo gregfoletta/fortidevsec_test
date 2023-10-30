@@ -1,0 +1,436 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use 5.010;
+use Pod::Usage;
+use Getopt::Long;
+use Term::ANSIColor;
+use Carp;
+use File::Spec;
+use Archive::Zip qw( :ERROR_CODES :CONSTANTS );
+use CAM::PDF;
+use Mojo::UserAgent;
+
+
+my %args;
+GetOptions(
+    \%args,
+    'username=s',
+    'password=s',
+    'client_id=s',
+    'license-dir=s',
+    'no-licenses=s',
+    'ipv4-addresses=s',
+    'help' => sub { pod2usage(1) }
+) or pod2usage(2);
+
+=pod
+
+=encoding UTF-8
+
+=head1 NAME
+
+ftnt_license_registration - extract, register, and download Fortinet licenses.
+
+=head1 VERSION
+
+version .3
+
+=head1 SYNOPSIS
+
+    # Register FTNT licenses straight from zip files.
+    # FortiCloud credentials stored in ~/.ftnt/ftnt_cloud_api
+    # Licenses will be downloaded into the working directory
+    ./ftnt_license_registration ~/Documents/licenses/*.zip
+
+    # Specify the directory to store licenses
+    ./ftnt_license_registration --license-dir ~/Documents/licenses
+
+    # Don't download licenses, just register 
+    ./ftnt_license_registration --no-licenses
+
+    # API user/pass can be specified as ENV vars
+    export FORTICLOUD_API_USERNAME='<user>'
+    export FORTICLOUD_API_PASSWORD='<pass>'
+    ./ftnt_license_registration
+
+    # Or on the command line
+    ./ftnt_license_registration --username '<user>' --pasword '<pass>'
+
+=head1 OPTIONS
+
+=over
+
+=item -u|--username I<user> - the FortiCloud API username
+
+=item -p|--password I<pass> - the FortiCloud API password
+
+=item -l|--license-dir I<path> - the path to save registered licenses
+
+=item -n|--no-licenses - don't download licenses
+
+=item -n|--ipv4-addresses - assign an IPv4 address when registering (see section below for more details)
+
+=item -h|--help - print usage information
+
+=back
+
+
+=head1 DESCRIPTION
+
+The 'Fortinet License Registration' script allows you to easly bulk-register and download Fortinet licenses.
+
+The licenses come in email as PDFs inside zip archives. This script takes one or more zip files and
+
+=over 1
+
+=item Opens the zip file in memory
+
+=item Reads the PDFs inside
+
+=item Extracts the registration code
+
+=item Registers the code into the FortiCare support portal
+
+=back
+
+=head1 REQUIREMENTS
+
+You'll need the following modules, preferably installed using the more modern L<cpanminus|https://metacpan.org/pod/App::cpanminus>:
+
+    sh$ cpanm Archive::Zip CAM::PDF Mojo::UserAgent
+
+or the old CPAN client:
+
+    sh$ cpan Archive::Zip CAM::PDF Mojo::UserAgent
+
+=head1 AUTHENTICATION
+
+The script uses version 3 of the registration API. This uses OAuth tokens generated from IAM API username/passwords. You can create IAM users L<here|https://support.fortinet.com/iam/#/api-user>.
+
+Once you have your credentials, the script will search for them in three places:
+
+=over 
+
+=item In ~/.ftnt/ftnt_cloud_api formatted as <username>:<password>
+
+=over
+
+=item  Lines beginning with '#' are skipped
+
+=back
+
+=item In the environment variabes C<FORTICLOUD_API_USER> and C<FORTICLOUD_API_PASSWORD>
+
+=item In the command line arguments C<-u|--username> and C<-p|--password>.
+
+=back
+
+If the credentials are available in multiple places, local dotfile beats environment variable beats commandline.
+
+Note that the password appears to always have an exclaimation mark, so be sure to enclose in single quotes if you're using the environment variable or command line methods.
+
+=head1 IPv4 ADDRESSES
+
+The C<--ipv4-addresses> argument takes two different arguments: a C<file> or and C<ipv4_address>
+
+Some devices do not take an IP address (for example, FortiGates). This script will not discriminate, and will still try to apply the IP address. Recommendation it that if you're using this command, separate the licenses that require an IP into a different folder. You can this run this script across that folder with this --ipv4-addresses argument.
+
+=head2 --ipv4-addresses <file>
+
+When given a file, the script opens it and reads in each line, expecting it to be an IPv4 address. If it's not an IPv4 address, it skips the
+ line. Any line starting with '#' is considered a comment and skipped.
+
+It then uses one of these IPv4 addresses in each of the license registration requests. If there 'n' licenses and 'm' IPv4 addresses in the file, then the last (n - m) licenses will not include an IPv4 addresses.
+
+=head2 --ipv4-addresses <ipv4_address>
+
+If it cannot open a file, the script will then check to see if it is an IPv4 address. It will then include this address in every license registration request. This is useful if you're registering the licenses for a lab where the IP addressing matches across each lab 'pod'.
+
+=head1 LICENSE DOWNLOAD
+
+The registration API generally returns the license keys for the codes you register with a couple of caveats:
+
+=over
+
+=item Some aren't returned, for example FortiManager licneses
+
+=item Some devices require an IP specification, which will not have been done rendering the license useless.
+
+=back
+
+You will get warnings in the console for registration codes that do not return a license.
+
+=cut
+
+### Log Helpers###
+
+sub log_output {
+    print STDERR colored('- ', 'bold green');
+    say STDERR join ' ', @_;
+}
+
+sub log_error {
+    say STDERR colored('- '.join(' ', @_), 'bold red');
+    exit(1);
+}
+
+sub log_warning {
+    say STDERR colored('- '.join(' ', @_), 'bold yellow');
+}
+
+# We don't want to print Zip errors to consumers - we'll handle it ourselves.
+Archive::Zip::setErrorHandler( sub {} );
+
+# Extract the registration codes from zip files
+my @codes = extract_reg_codes(@ARGV);
+
+log_error "No codes found, exiting" unless @codes;
+
+# Need the number if codes so we can multiply the single IP by that number.
+my @ipv4_addresses = license_ipv4_addresses($args{'ipv4-addresses'}, scalar @codes);
+
+# Try and get creds from ~/.ftnt/ftnt_cloud_api
+my %dotfile_creds = dotfile_creds();
+
+# Get our API access token
+my $access_token = forticare_auth(
+    # FORTICARE_API was a mistake in the first version.
+    username => $dotfile_creds{username} // $args{username} // $ENV{FORTICLOUD_API_USER},
+    password => $dotfile_creds{password} // $args{password} // $ENV{FORTICLOUD_API_PASSWORD} // $ENV{FORTICARE_API_PASSWORD},
+    client_id => $args{client_id} // 'assetmanagement'
+);
+
+# Register the devices
+my @licenses = forticare_register($access_token, \@codes, \@ipv4_addresses);
+
+# Write out the license files
+write_license_files(
+    directory => $args{'license-dir'},
+    licenses => [@licenses] 
+) unless $args{'no-licenses'};
+
+
+
+sub dotfile_creds {
+    my $cred_path = File::Spec->canonpath( "$ENV{HOME}/.ftnt/ftnt_cloud_api" );
+    my %creds;
+
+    open(my $fh, "<:encoding(UTF-8)", $cred_path) or return ();
+
+    while (my $line = <$fh>) {
+        next if $line =~ m{^\s*#};
+
+        chomp $line;
+
+        @creds{qw(username password)} = split ':', $line;
+
+        return %creds;
+    }
+}
+
+sub license_ipv4_addresses {
+    my ($ip_or_file, $n_codes) = @_;
+    my @ips;
+
+    return () unless defined $ip_or_file;
+
+    my $open_ret = open(my $fh, "<:encoding(UTF-8)", $ip_or_file);
+
+    if ($open_ret) {
+        log_output "Successfully opened IPv4 address list '$ip_or_file'";
+        @ips = ipv4_addresses_from_file($fh);
+    } else {
+        log_output "Cannot open '$ip_or_file' as file, treating as IPv4 address";
+        # Rough IPv4 validation
+        if (is_ipv4_address($ip_or_file)) {
+            @ips = ($ip_or_file) x $n_codes;
+        } else {
+            log_warning "Argument to '--ipv4-addresses' is neither a file, nor an IP address, ignoring";
+            return ();
+        }
+    }
+}        
+
+# Close enough to an IPv4 address
+sub is_ipv4_address { return $_[0] =~ m{^(\d{1,3}\.){3} \d{1,3}$}xms }
+
+sub ipv4_addresses_from_file {
+    my ($fh) = @_;
+    my @ipv4;
+
+    while (my $line = <$fh>) {
+        chomp $line;
+        # Skip comments
+        next if $line =~ m{^\s*#};
+        if (!is_ipv4_address($line)) {
+            log_warning "'$line' is not an IPv4 address, skipping";
+            next;
+        } 
+
+        push @ipv4, $line;
+    }
+
+    return @ipv4;
+}
+
+
+
+
+sub extract_reg_codes {
+    my (@zip_files) = @_;
+    my @codes;
+
+    my $zip  = Archive::Zip->new();
+
+    # Read in each zipfile
+    ZIP:
+    for my $zip_file (@zip_files) {
+        log_output("Reading $zip_file");
+
+        if (eval { $zip->read($zip_file) } != AZ_OK) { 
+            log_warning("$zip_file does not appear to be a valid zip file, skipping...");
+            next ZIP;
+        }
+    }
+   
+    PDF:
+    for my $pdf_name ($zip->memberNames()) {
+        # Extract PDF contents
+        my $pdf = CAM::PDF->new( $zip->memberNamed( $pdf_name )->contents() );
+       
+        # Regex out the registration code
+        my ($registration_code) = $pdf->getPageText(1) =~ m{Registration Code\s+:\s+((\w{5}-){4}(\w{6}))};
+
+        if (!$registration_code) {
+            carp "Error extracting code from '$pdf_name'";
+            next PDF;
+        }
+
+        log_output("Extracted code $registration_code");
+
+        push @codes, $registration_code;
+    }
+
+    return @codes;
+}
+
+
+sub forticare_auth {
+    my (%credentials) = @_;
+    
+    my $ua = Mojo::UserAgent->new;
+    my %auth_info = (
+        uri => 'https://customerapiauth.fortinet.com/api/v1/oauth/token/',
+        json => {
+            username => $credentials{username},
+            password => $credentials{password},
+            client_id => $credentials{client_id},
+            grant_type => 'password'
+        }
+    );
+
+    my $res = $ua->post( $auth_info{uri} => json => $auth_info{json} )->result;
+
+    if ($res->is_error) {
+        my $msg;
+        if (defined $res->json->{oauth}) {
+            $msg = join '/', values %{$res->json->{oauth}};
+        } elsif (defined $res->json->{error_message}) {
+            $msg = $res->json->{error_message};
+        } elsif (defined $res->json->{error_description}) {
+            $msg = $res->json->{error_description};
+        } else {
+            $msg = "Unknown Error";
+        }
+            
+        log_error("Authentication Error ". $msg);
+    }
+
+    if (defined $res->{error}) {
+        croak "Could not authenticate: ". $res->{error_description};
+    }
+
+    log_output("Authentication Success");
+
+    return $res->json->{access_token};
+}
+
+sub forticare_register {
+    my ($access_token, $reg_codes, $ipv4_addresses) = @_;
+
+    my @licenses;
+
+    my $ua = Mojo::UserAgent->new;
+
+    CODE:
+    for my $code (@{ $reg_codes }) {
+        log_output("Registering code $code");
+        # Is there an IPv4 address to go along with this?
+        my $ipv4_address = shift @{ $ipv4_addresses };
+        if (defined $ipv4_address) {
+            log_output "IPv4 address found to be assigned: $ipv4_address" if $ipv4_address;
+        } 
+
+        my $request_json = {
+                licenseRegistrationCode => $code,
+                description => "Auto Registered ".localtime()
+        };
+        
+        $request_json->{additionalInfo} = $ipv4_address if defined $ipv4_address;
+
+        my $res = $ua->post(
+            'https://support.fortinet.com/ES/api/registration/v3/licenses/register' =>
+            { Authorization => "Bearer $access_token" } =>
+            json => $request_json
+        )->result;
+
+        if ($res->is_error) {
+            log_warning("API Error: ".$res->json->{message});
+            next CODE;
+        }
+
+        my %license;
+        @license{ qw(sku file serial) } = (
+            @{ $res->json->{assetDetails}{license} }{ qw(licenseSKU licenseFile) },
+            $res->json->{assetDetails}{serialNumber}
+        );
+
+
+
+        log_output("Registered $license{sku} ($license{serial})");
+
+        # Push the license and serial on to the stack
+        push @licenses, \%license;
+    }
+
+    return @licenses;
+}
+
+sub write_license_files {
+    my (%license_info) = @_;
+
+    $license_info{directory} //= $ENV{PWD};
+
+    LICENSE:
+    for my $license (@{ $license_info{licenses} }) {
+        # Some devices don't return the license file (e.g. FMG)
+        if (!$license->{file}) {
+            log_warning("No license file received for $license->{serial}");
+            next LICENSE;
+        }
+
+        my $license_path = File::Spec->canonpath( $license_info{directory}."/".$license->{serial}.".lic" );
+
+        my $fh;
+        if(!open($fh, '>:encoding(UTF-8)', $license_path)) {
+            log_warning("Could not open $license_path for writing, skipping...");
+            next LICENSE;
+        }
+
+        log_output("Writing $license_path");    
+        print $fh $license->{file};
+        close $fh;
+    }
+} 
