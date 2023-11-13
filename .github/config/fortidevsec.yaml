@@ -6,7 +6,7 @@ scanners:
   - secret
   - iac
   - container
-   - dast
+  - dast
 
 # Configures languages for sast scanner. If not configured, scans will be performed on all supported languages
 # languages:
@@ -14,9 +14,9 @@ scanners:
 #   - python
 
 # Configures target url where dynamic scan should be performed.
- dast:
-   url: https://articles.foletta.org
-   full_scan: true #true|false
+dast:
+  url: https://articles.foletta.org
+  full_scan: true #true|false
 
 # Language scanners run sequentially by default. Can be configured to run in parallel.
 # resource:
