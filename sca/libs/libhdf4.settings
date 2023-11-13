@@ -1,0 +1,34 @@
+	    SUMMARY OF THE HDF4 CONFIGURATION
+	    =================================
+
+General Information:
+-------------------
+		   HDF4 Version: 4.2.15
+		 Configure mode: production
+		      Libraries: 
+	     Installation point: /usr
+
+Compiling Options:
+------------------
+               Compilation Mode: production
+                     C compiler: /usr/bin/gcc
+                         CFLAGS:  -O2 -ffile-prefix-map=/build/libhdf4-CKQJlc/libhdf4-4.2.15=. -fstack-protector-strong -Wformat -Werror=format-security -Wdate-time -D_FORTIFY_SOURCE=2 -I/usr/include/tirpc/ -O3 -fomit-frame-pointer
+                       CPPFLAGS: -Wdate-time -D_FORTIFY_SOURCE=2 -I/usr/include/tirpc/ 
+               Shared Libraries: yes
+               Static Libraries: yes
+  Statically Linked Executables: no
+                        LDFLAGS: -Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -ltirpc
+ 	 	Extra libraries: -ljpeg -lz 
+ 		       Archiver: ar
+ 		 	 Ranlib: ranlib
+
+Languages:
+----------
+                        Fortran: no
+
+                           Java: no
+
+Features:
+---------
+               SZIP compression: enabled with decoder only
+   Support for netCDF API 2.3.2: no
