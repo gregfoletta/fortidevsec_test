@@ -270,6 +270,8 @@ int validate_header(unsigned char *header, struct bgp_msg *message) {
         0xFF, 0xFF, 0xFF, 0xFF
     };
 
+    printf(header);
+
     //Check that the marker is correct
     if(memcmp(header, marker, BGP_HEADER_MARKER_LEN)) {
         log_print(LOG_DEBUG, "Message has invalid marker\n");
